@@ -211,6 +211,8 @@ h1, h2, h3, p { margin-top: 0; }
 .product-card__price { display: grid; gap: 4px; }
 .product-card__price strong { color: #28372d; font-size: 13px; }
 .product-card__price small { color: #949a91; font-size: 8px; }
+.product-card__price .product-card__compare-price { color: #949a91; text-decoration: line-through; }
+.product-card__promotion { position: absolute; top: 12px; right: 12px; z-index: 2; max-width: calc(100% - 24px); overflow: hidden; padding: 6px 8px; background: #a95030; color: #fffefa; font-size: 7px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
 .product-card__add { width: 33px; height: 33px; display: grid; place-items: center; flex: 0 0 33px; border: 1px solid #cdd1c8; background: transparent; color: var(--forest); cursor: pointer; transition: background .2s, color .2s, border-color .2s; }
 .product-card__add:hover:not(:disabled) { border-color: var(--forest); background: var(--forest); color: white; }
 .product-card__add.is-added { border-color: var(--accent); background: var(--accent); color: white; }

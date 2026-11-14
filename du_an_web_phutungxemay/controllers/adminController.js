@@ -166,6 +166,58 @@ async function adjustStock(client, product, delta, movementType, note, invoiceId
   ]);
 }
 
+function parseProductPriceListOverrides(value) {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    throw httpError(400, 'Giá theo bảng giá sản phẩm không hợp lệ.');
+  }
+  const overrides = new Map();
+  for (const [rawId, rawPrice] of Object.entries(value)) {
+    const listId = Number(rawId);
+    if (!Number.isSafeInteger(listId) || listId <= 0) throw httpError(400, 'Mã bảng giá sản phẩm không hợp lệ.');
+    overrides.set(listId, money(rawPrice, 'Giá trong bảng bán lẻ', { allowZero: false }));
+  }
+  return overrides;
+}
+
+async function syncProductPriceLists(client, productId, regularPrice, submittedPrices) {
+  const overrides = parseProductPriceListOverrides(submittedPrices);
+  const { rows } = await client.query(`
+    SELECT pl.id, pl.name, pli.price
+    FROM price_lists AS pl
+    LEFT JOIN price_list_items AS pli ON pli.price_list_id = pl.id AND pli.product_id = $1
+    WHERE pl.is_active = TRUE AND (pl.ends_on IS NULL OR pl.ends_on >= CURRENT_DATE)
+    ORDER BY pl.id
+  `, [productId]);
+  const applicableIds = new Set(rows.map((row) => Number(row.id)));
+  if (overrides && [...overrides.keys()].some((id) => !applicableIds.has(id))) {
+    throw httpError(409, 'Danh sách bảng giá đã thay đổi. Hãy tải lại biểu mẫu sản phẩm.');
+  }
+  if (rows.length && Number(regularPrice) <= 0) {
+    throw httpError(400, 'Giá bán phải lớn hơn 0 khi có bảng giá bán lẻ đang áp dụng.');
+  }
+
+  for (const row of rows) {
+    const listId = Number(row.id);
+    const currentPrice = row.price === null ? null : String(row.price);
+    const price = overrides?.has(listId) ? overrides.get(listId) : currentPrice || String(regularPrice);
+    if (Number(price) > Number(regularPrice)) {
+      throw httpError(400, `Giá trong bảng “${row.name}” không được cao hơn giá niêm yết.`);
+    }
+    if (currentPrice === null) {
+      await client.query(
+        'INSERT INTO price_list_items (price_list_id, product_id, price) VALUES ($1, $2, $3)',
+        [listId, productId, price],
+      );
+    } else if (overrides?.has(listId)) {
+      await client.query(
+        'UPDATE price_list_items SET price = $3 WHERE price_list_id = $1 AND product_id = $2',
+        [listId, productId, price],
+      );
+    }
+  }
+}
+
 async function syncPrimaryImage(client, productId, imageUrl, productName) {
   const current = await client.query(
     'SELECT id, image_url FROM product_images WHERE product_id = $1 AND is_primary = TRUE ORDER BY id LIMIT 1',
@@ -185,11 +237,23 @@ async function lockProducts(client, ids, { activeOnly = false } = {}) {
   if (!ids.length) return new Map();
   const uniqueIds = [...new Set(ids)].sort((a, b) => a - b);
   const result = await client.query(`
-    SELECT id, name, sku, price, stock_quantity, is_active, status
-    FROM products
-    WHERE id = ANY($1::bigint[]) ${activeOnly ? "AND is_active = TRUE AND status = 'active'" : ''}
-    ORDER BY id
-    FOR UPDATE
+    SELECT p.id, p.name, p.sku,
+      COALESCE(offer.price, p.price) AS price,
+      p.stock_quantity, p.is_active, p.status
+    FROM products AS p
+    LEFT JOIN LATERAL (
+      SELECT pli.price
+      FROM price_list_items AS pli
+      JOIN price_lists AS pl ON pl.id = pli.price_list_id
+      WHERE pli.product_id = p.id AND pl.is_active = TRUE
+        AND (pl.starts_on IS NULL OR pl.starts_on <= CURRENT_DATE)
+        AND (pl.ends_on IS NULL OR pl.ends_on >= CURRENT_DATE)
+      ORDER BY pli.price ASC, pl.updated_at DESC, pl.id DESC
+      LIMIT 1
+    ) AS offer ON TRUE
+    WHERE p.id = ANY($1::bigint[]) ${activeOnly ? "AND p.is_active = TRUE AND p.status = 'active'" : ''}
+    ORDER BY p.id
+    FOR UPDATE OF p
   `, [uniqueIds]);
   const products = new Map(result.rows.map((product) => [Number(product.id), product]));
   if (products.size !== uniqueIds.length) {
@@ -270,17 +334,101 @@ function isStockHeld(status) {
 
 async function getSummary(_req, res) {
   try {
-    const [products, invoices, revenue, lowStock] = await Promise.all([
+    const [products, invoices, revenue, lowStock, monthRevenue, todayInvoices, inventoryValue, activePriceLists] = await Promise.all([
       pool.query('SELECT COUNT(*)::int AS total, COUNT(*) FILTER (WHERE is_active)::int AS active FROM products'),
       pool.query(`SELECT COUNT(*)::int AS total FROM invoices WHERE deleted_at IS NULL`),
-      pool.query(`SELECT COALESCE(SUM(total_amount), 0)::numeric(14, 2) AS total FROM invoices WHERE deleted_at IS NULL AND status NOT IN ('cancelled', 'refunded')`),
+      pool.query(`SELECT COALESCE(SUM(total_amount), 0)::numeric(14, 2) AS total FROM invoices WHERE deleted_at IS NULL AND status NOT IN ('draft', 'cancelled', 'refunded')`),
       pool.query(`SELECT COUNT(*)::int AS total FROM products WHERE is_active = TRUE AND status = 'active' AND stock_quantity <= 5`),
+      pool.query(`SELECT COALESCE(SUM(total_amount), 0)::numeric(14, 2) AS total FROM invoices WHERE deleted_at IS NULL AND status NOT IN ('draft', 'cancelled', 'refunded') AND created_at >= date_trunc('month', CURRENT_DATE)`),
+      pool.query(`SELECT COUNT(*)::int AS total FROM invoices WHERE deleted_at IS NULL AND created_at >= CURRENT_DATE`),
+      pool.query(`SELECT COALESCE(SUM(stock_quantity * COALESCE(cost_price, 0)), 0)::numeric(14, 2) AS total FROM products WHERE is_active = TRUE`),
+      pool.query(`SELECT COUNT(*)::int AS total FROM price_lists WHERE is_active = TRUE AND (starts_on IS NULL OR starts_on <= CURRENT_DATE) AND (ends_on IS NULL OR ends_on >= CURRENT_DATE)`),
     ]);
     res.json({
       products: products.rows[0],
       invoices: invoices.rows[0].total,
       revenue: revenue.rows[0].total,
       lowStock: lowStock.rows[0].total,
+      monthRevenue: monthRevenue.rows[0].total,
+      todayInvoices: todayInvoices.rows[0].total,
+      inventoryValue: inventoryValue.rows[0].total,
+      activePriceLists: activePriceLists.rows[0].total,
+    });
+  } catch (error) {
+    handleError(res, error);
+  }
+}
+
+async function getDashboard(req, res) {
+  const periods = {
+    '7d': { start: "CURRENT_DATE - INTERVAL '6 days'", step: "INTERVAL '1 day'", unit: 'day', format: 'DD/MM' },
+    '30d': { start: "CURRENT_DATE - INTERVAL '29 days'", step: "INTERVAL '1 day'", unit: 'day', format: 'DD/MM' },
+    '12m': { start: "date_trunc('month', CURRENT_DATE) - INTERVAL '11 months'", step: "INTERVAL '1 month'", unit: 'month', format: 'MM/YYYY' },
+    '24m': { start: "date_trunc('month', CURRENT_DATE) - INTERVAL '23 months'", step: "INTERVAL '1 month'", unit: 'month', format: 'MM/YYYY' },
+  };
+  const period = periods[req.query.period] ? req.query.period : '24m';
+  const selected = periods[period];
+  const rangeEnd = selected.unit === 'day' ? "CURRENT_DATE + INTERVAL '1 day'" : "date_trunc('month', CURRENT_DATE) + INTERVAL '1 month'";
+  try {
+    const [salesTrend, topProducts, stockByCategory, invoiceStatuses] = await Promise.all([
+      pool.query(`
+        WITH calendar AS (
+          SELECT generate_series(${selected.start}, ${selected.unit === 'day' ? 'CURRENT_DATE' : "date_trunc('month', CURRENT_DATE)"}, ${selected.step}) AS period_start
+        ), sales AS (
+          SELECT date_trunc('${selected.unit}', i.created_at::timestamp) AS period_start,
+            SUM(i.total_amount)::numeric(14, 2) AS revenue,
+            COUNT(*)::int AS invoices
+          FROM invoices AS i
+          WHERE i.deleted_at IS NULL AND i.status NOT IN ('draft', 'cancelled', 'refunded')
+            AND i.created_at >= ${selected.start} AND i.created_at < ${rangeEnd}
+          GROUP BY 1
+        )
+        SELECT TO_CHAR(calendar.period_start, '${selected.format}') AS label,
+          COALESCE(sales.revenue, 0)::numeric(14, 2) AS revenue,
+          COALESCE(sales.invoices, 0)::int AS invoices
+        FROM calendar
+        LEFT JOIN sales USING (period_start)
+        ORDER BY calendar.period_start
+      `),
+      pool.query(`
+        SELECT COALESCE(ii.product_name, p.name) AS name, ii.sku,
+          SUM(ii.quantity)::int AS units_sold,
+          SUM(ii.line_total)::numeric(14, 2) AS revenue
+        FROM invoice_items AS ii
+        JOIN invoices AS i ON i.id = ii.invoice_id
+        LEFT JOIN products AS p ON p.id = ii.product_id
+        WHERE i.deleted_at IS NULL AND i.status NOT IN ('draft', 'cancelled', 'refunded')
+          AND i.created_at >= ${selected.start} AND i.created_at < ${rangeEnd}
+        GROUP BY COALESCE(ii.product_name, p.name), ii.sku
+        ORDER BY units_sold DESC, revenue DESC
+        LIMIT 5
+      `),
+      pool.query(`
+        SELECT COALESCE(c.name, 'Chưa phân loại') AS name,
+          COUNT(p.id)::int AS products,
+          COALESCE(SUM(p.stock_quantity), 0)::int AS stock,
+          COALESCE(SUM(p.stock_quantity * COALESCE(p.cost_price, 0)), 0)::numeric(14, 2) AS value
+        FROM products AS p
+        LEFT JOIN categories AS c ON c.id = p.category_id
+        WHERE p.is_active = TRUE
+        GROUP BY c.id, c.name
+        ORDER BY stock DESC, products DESC
+        LIMIT 6
+      `),
+      pool.query(`
+        SELECT status, COUNT(*)::int AS total
+        FROM invoices
+        WHERE deleted_at IS NULL
+        GROUP BY status
+        ORDER BY total DESC, status
+      `),
+    ]);
+    res.json({
+      period,
+      salesTrend: salesTrend.rows,
+      topProducts: topProducts.rows,
+      stockByCategory: stockByCategory.rows,
+      invoiceStatuses: invoiceStatuses.rows,
     });
   } catch (error) {
     handleError(res, error);
@@ -427,12 +575,31 @@ async function getProducts(_req, res) {
   try {
     const { rows } = await pool.query(`
       SELECT p.id, p.category_id, c.name AS category_name, p.brand_id, b.name AS brand_name,
-        p.supplier_id, s.name AS supplier_name, p.name, p.sku, p.price, p.cost_price,
+        p.supplier_id, s.name AS supplier_name, p.name, p.sku, p.price,
+        COALESCE(offer.price, p.price) AS selling_price, offer.name AS price_list_name, p.cost_price,
+        COALESCE(list_prices.prices, '{}'::jsonb) AS price_list_prices,
         p.stock_quantity, p.status, p.is_active, p.image_url, p.description, p.created_at, p.updated_at
       FROM products AS p
       LEFT JOIN categories AS c ON c.id = p.category_id
       LEFT JOIN brands AS b ON b.id = p.brand_id
       LEFT JOIN suppliers AS s ON s.id = p.supplier_id
+      LEFT JOIN LATERAL (
+        SELECT pli.price, pl.name
+        FROM price_list_items AS pli
+        JOIN price_lists AS pl ON pl.id = pli.price_list_id
+        WHERE pli.product_id = p.id AND pl.is_active = TRUE
+          AND (pl.starts_on IS NULL OR pl.starts_on <= CURRENT_DATE)
+          AND (pl.ends_on IS NULL OR pl.ends_on >= CURRENT_DATE)
+        ORDER BY pli.price ASC, pl.updated_at DESC, pl.id DESC
+        LIMIT 1
+      ) AS offer ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT jsonb_object_agg(pli.price_list_id::text, pli.price) AS prices
+        FROM price_list_items AS pli
+        JOIN price_lists AS pl ON pl.id = pli.price_list_id
+        WHERE pli.product_id = p.id AND pl.is_active = TRUE
+          AND (pl.ends_on IS NULL OR pl.ends_on >= CURRENT_DATE)
+      ) AS list_prices ON TRUE
       ORDER BY p.updated_at DESC, p.id DESC
     `);
     res.json({ data: rows });
@@ -456,6 +623,7 @@ async function createProduct(req, res) {
         product.price, product.costPrice, product.status, product.isActive, product.imageUrl, product.description,
       ]);
       const saved = rows[0];
+      await syncProductPriceLists(client, saved.id, product.price, req.body.price_list_prices);
       if (product.stock > 0) await adjustStock(client, saved, product.stock, 'opening', 'Tồn kho ban đầu');
       await syncPrimaryImage(client, saved.id, product.imageUrl, product.name);
       await writeActivity(client, 'create', 'product', saved.id, { name: product.name, sku: product.sku });
@@ -485,6 +653,7 @@ async function updateProduct(req, res) {
         id, product.categoryId, product.brandId, product.supplierId, product.name, product.sku,
         product.price, product.costPrice, product.status, product.isActive, product.imageUrl, product.description,
       ]);
+      await syncProductPriceLists(client, id, product.price, req.body.price_list_prices);
       const delta = product.stock - Number(current.stock_quantity);
       if (delta) await adjustStock(client, rows[0], delta, 'adjustment', 'Điều chỉnh tồn kho từ trang quản trị');
       await syncPrimaryImage(client, id, product.imageUrl, product.name);
@@ -745,7 +914,14 @@ async function createPayment(req, res) {
 }
 
 module.exports = {
+  withTransaction,
+  parseProduct,
+  adjustStock,
+  syncProductPriceLists,
+  syncPrimaryImage,
+  writeActivity,
   getSummary,
+  getDashboard,
   getLookups,
   getCatalog,
   createCatalog,

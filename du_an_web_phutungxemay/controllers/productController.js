@@ -9,12 +9,24 @@ async function getAllProducts(req, res) {
         c.name AS category_name,
         p.name,
         p.sku,
-        p.price,
+        COALESCE(offer.price, p.price) AS price,
+        p.price AS base_price,
+        offer.name AS promotion_name,
         p.stock_quantity,
         p.image_url,
         p.description
       FROM products AS p
       LEFT JOIN categories AS c ON c.id = p.category_id
+      LEFT JOIN LATERAL (
+        SELECT pli.price, pl.name
+        FROM price_list_items AS pli
+        JOIN price_lists AS pl ON pl.id = pli.price_list_id
+        WHERE pli.product_id = p.id AND pl.is_active = TRUE
+          AND (pl.starts_on IS NULL OR pl.starts_on <= CURRENT_DATE)
+          AND (pl.ends_on IS NULL OR pl.ends_on >= CURRENT_DATE)
+        ORDER BY pli.price ASC, pl.updated_at DESC, pl.id DESC
+        LIMIT 1
+      ) AS offer ON TRUE
       WHERE p.is_active = TRUE AND p.status = 'active'
       ORDER BY p.id DESC
     `);

@@ -31,7 +31,7 @@ addressText.textContent = store.address || 'Thông tin sẽ được cập nhậ
 contactForm.addEventListener('submit', (event) => {
   event.preventDefault();
   if (!store.email) {
-    formStatus.textContent = 'Cửa hàng chưa cấu hình email nhận yêu cầu. Hãy cập nhật email trong public/js/store-config.js.';
+    formStatus.textContent = 'Cửa hàng chưa cấu hình email nhận yêu cầu. Vui lòng liên hệ cửa hàng qua số điện thoại hoặc Zalo.';
     formStatus.classList.add('is-error');
     return;
   }

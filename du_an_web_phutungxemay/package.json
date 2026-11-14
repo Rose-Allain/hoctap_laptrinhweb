@@ -1,21 +1,27 @@
 {
-  "name": "motorcycle-parts-store",
-  "version": "1.0.0",
-  "private": true,
-  "description": "Website thương mại điện tử bán phụ tùng xe máy",
-  "main": "server.js",
-  "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js",
-    "test": "node -e \"console.log('Chưa cấu hình test tự động (placeholder).')\""
-  },
-  "engines": {
-    "node": ">=18"
-  },
-  "dependencies": {
-    "cors": "^2.8.5",
-    "dotenv": "^16.4.7",
-    "express": "^4.21.2",
-    "pg": "^8.13.1"
-  }
+    "name": "motorcycle-parts-store",
+    "version": "1.0.0",
+    "private": true,
+    "description": "Website thương mại điện tử bán phụ tùng xe máy",
+    "main": "server.js",
+    "scripts": {
+        "start": "node server.js",
+        "dev": "node --watch server.js",
+        "test": "node -e \"console.log('Chưa cấu hình test tự động (placeholder).')\"",
+        "create-admin": "node scripts/createAdmin.js",
+        "gen-secret": "node -e \"console.log(require('crypto').randomBytes(48).toString('hex'))\""
+    },
+    "engines": {
+        "node": ">=18"
+    },
+    "dependencies": {
+        "cookie-parser": "^1.4.7",
+        "cors": "^2.8.5",
+        "dotenv": "^16.4.7",
+        "ejs": "^7.0.2",
+        "exceljs": "^4.4.0",
+        "express": "^4.21.2",
+        "express-session": "^1.19.0",
+        "pg": "^8.13.1"
+    }
 }

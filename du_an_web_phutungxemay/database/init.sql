@@ -1,5 +1,5 @@
 -- Schema PostgreSQL cho website phụ tùng xe máy và trang quản trị.
--- Có đúng 12 bảng. Chạy lại script an toàn; orders/order_items cũ sẽ được đổi tên
+-- Chạy lại script an toàn; orders/order_items cũ sẽ được đổi tên
 -- thành invoices/invoice_items và dữ liệu hiện có được giữ lại.
 
 BEGIN;
@@ -135,7 +135,44 @@ ALTER TABLE products DROP CONSTRAINT IF EXISTS products_status_check;
 ALTER TABLE products ADD CONSTRAINT products_status_check
     CHECK (status IN ('draft', 'active', 'discontinued'));
 
--- 6. Ảnh sản phẩm, cho phép mỗi mặt hàng có nhiều ảnh.
+-- 6. Bảng giá bán lẻ theo chiến dịch và thời gian hiệu lực.
+CREATE TABLE IF NOT EXISTS price_lists (
+    id BIGSERIAL PRIMARY KEY,
+    name VARCHAR(150) NOT NULL,
+    description TEXT,
+    starts_on DATE,
+    ends_on DATE,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT price_lists_date_range_check
+        CHECK (starts_on IS NULL OR ends_on IS NULL OR ends_on >= starts_on)
+);
+
+CREATE TABLE IF NOT EXISTS price_list_items (
+    id BIGSERIAL PRIMARY KEY,
+    price_list_id BIGINT NOT NULL REFERENCES price_lists(id) ON DELETE CASCADE,
+    product_id BIGINT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    price NUMERIC(14, 2) NOT NULL CHECK (price > 0),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT price_list_items_product_unique UNIQUE (price_list_id, product_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_price_lists_active_dates
+    ON price_lists(is_active, starts_on, ends_on);
+CREATE INDEX IF NOT EXISTS idx_price_list_items_product
+    ON price_list_items(product_id, price_list_id);
+
+INSERT INTO price_list_items (price_list_id, product_id, price)
+SELECT pl.id, p.id, p.price
+FROM price_lists AS pl
+CROSS JOIN products AS p
+WHERE pl.is_active = TRUE
+  AND (pl.ends_on IS NULL OR pl.ends_on >= CURRENT_DATE)
+  AND p.is_active = TRUE AND p.status = 'active'
+ON CONFLICT (price_list_id, product_id) DO NOTHING;
+
+-- 7. Ảnh sản phẩm, cho phép mỗi mặt hàng có nhiều ảnh.
 CREATE TABLE IF NOT EXISTS product_images (
     id BIGSERIAL PRIMARY KEY,
     product_id BIGINT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
@@ -146,7 +183,7 @@ CREATE TABLE IF NOT EXISTS product_images (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- 7. Nhật ký nhập, xuất và điều chỉnh tồn kho.
+-- 8. Nhật ký nhập, xuất và điều chỉnh tồn kho.
 CREATE TABLE IF NOT EXISTS inventory_transactions (
     id BIGSERIAL PRIMARY KEY,
     product_id BIGINT REFERENCES products(id) ON DELETE SET NULL,
@@ -165,7 +202,7 @@ CREATE TABLE IF NOT EXISTS inventory_transactions (
     CHECK (quantity_after = quantity_before + quantity_change)
 );
 
--- 8. Hóa đơn. Thông tin người mua/giá được chụp tại thời điểm bán.
+-- 9. Hóa đơn. Thông tin người mua/giá được chụp tại thời điểm bán.
 -- Xóa hóa đơn trên giao diện nên đặt deleted_at thay vì xóa vật lý để giữ lịch sử thanh toán.
 CREATE TABLE IF NOT EXISTS invoices (
     id BIGSERIAL PRIMARY KEY,
@@ -251,7 +288,7 @@ ALTER TABLE invoices DROP CONSTRAINT IF EXISTS invoices_shipping_fee_check;
 ALTER TABLE invoices ADD CONSTRAINT invoices_shipping_fee_check CHECK (shipping_fee >= 0);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_invoice_code ON invoices(invoice_code);
 
--- 9. Dòng hàng của hóa đơn; tên, SKU và đơn giá được giữ lại dù sản phẩm thay đổi/xóa.
+-- 10. Dòng hàng của hóa đơn; tên, SKU và đơn giá được giữ lại dù sản phẩm thay đổi/xóa.
 CREATE TABLE IF NOT EXISTS invoice_items (
     id BIGSERIAL PRIMARY KEY,
     invoice_id BIGINT NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
@@ -296,7 +333,7 @@ ALTER TABLE invoice_items ADD CONSTRAINT invoice_items_discount_amount_check CHE
 ALTER TABLE invoice_items DROP CONSTRAINT IF EXISTS invoice_items_line_total_check;
 ALTER TABLE invoice_items ADD CONSTRAINT invoice_items_line_total_check CHECK (line_total >= 0);
 
--- 10. Các lần thanh toán cho hóa đơn (hỗ trợ thanh toán nhiều đợt).
+-- 11. Các lần thanh toán cho hóa đơn (hỗ trợ thanh toán nhiều đợt).
 CREATE TABLE IF NOT EXISTS payments (
     id BIGSERIAL PRIMARY KEY,
     invoice_id BIGINT NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
@@ -312,7 +349,7 @@ CREATE TABLE IF NOT EXISTS payments (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- 11. Lịch sử đổi trạng thái hóa đơn để admin tra cứu.
+-- 12. Lịch sử đổi trạng thái hóa đơn để admin tra cứu.
 CREATE TABLE IF NOT EXISTS invoice_status_history (
     id BIGSERIAL PRIMARY KEY,
     invoice_id BIGINT NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
@@ -323,7 +360,7 @@ CREATE TABLE IF NOT EXISTS invoice_status_history (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- 12. Nhật ký thao tác quản trị, lưu dữ liệu thay đổi dưới dạng JSON.
+-- 13. Nhật ký thao tác quản trị, lưu dữ liệu thay đổi dưới dạng JSON.
 CREATE TABLE IF NOT EXISTS admin_activity_logs (
     id BIGSERIAL PRIMARY KEY,
     admin_id BIGINT REFERENCES users(id) ON DELETE SET NULL,

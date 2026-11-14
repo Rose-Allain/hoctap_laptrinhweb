@@ -87,7 +87,19 @@ function formatPrice(value) {
 function safeImageUrl(value) {
   if (typeof value !== 'string' || !value.trim()) return null;
   try {
-    const url = new URL(value.trim(), window.location.origin);
+    const raw = value.trim().replace(/\\/g, '/');
+    const isExternal = /^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(raw);
+    const relativePath = raw.replace(/^\.\/+/, '');
+    const source = isExternal
+      ? raw
+      : raw.startsWith('/')
+        ? raw
+        : relativePath.startsWith('public/images/')
+          ? `/${relativePath.slice('public/'.length)}`
+          : relativePath.startsWith('images/')
+            ? `/${relativePath}`
+            : `/images/${relativePath}`;
+    const url = new URL(source, window.location.origin);
     return ['https:', 'http:'].includes(url.protocol) ? url.href : null;
   } catch (_error) {
     return null;
@@ -166,7 +178,13 @@ function createProductCard(product) {
   const description = createElement('p', 'product-card__description', product.description || 'Thông tin chi tiết sản phẩm đang được cập nhật.');
   const bottom = createElement('div', 'product-card__bottom');
   const price = createElement('div', 'product-card__price');
-  price.append(createElement('strong', '', formatPrice(product.price)));
+  const currentPrice = Number(product.price) || 0;
+  const basePrice = Number(product.base_price ?? product.price) || 0;
+  price.append(createElement('strong', '', formatPrice(currentPrice)));
+  if (basePrice > currentPrice) {
+    price.append(createElement('small', 'product-card__compare-price', `Giá niêm yết ${formatPrice(basePrice)}`));
+    if (product.promotion_name) visual.append(createElement('span', 'product-card__promotion', product.promotion_name));
+  }
   const stock = Math.max(0, Number(product.stock_quantity) || 0);
   price.append(createElement('small', '', stock > 0 ? `Còn ${stock} sản phẩm` : 'Tạm hết hàng'));
 
@@ -256,7 +274,32 @@ function saveCart() {
   } catch (error) {
     console.warn('Không thể lưu giỏ hàng trên thiết bị:', error);
   }
+  // Đồng bộ giỏ hàng vào cookie phía server (cookie rideform.cart).
+  fetch('/api/cart', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
+    body: JSON.stringify({ items: cart }),
+  }).catch(() => {});
   renderCart();
+}
+
+async function restoreCartFromCookie() {
+  if (Object.keys(cart).length) return;
+  try {
+    const response = await fetch('/api/cart', { credentials: 'same-origin' });
+    if (!response.ok) return;
+    const payload = await response.json();
+    const saved = payload?.data;
+    if (!saved || typeof saved !== 'object' || !Object.keys(saved).length) return;
+    cart = saved;
+    try {
+      localStorage.setItem(CART_STORAGE_KEY, JSON.stringify(cart));
+    } catch (_error) { /* bỏ qua khi trình duyệt chặn localStorage */ }
+    renderCart();
+  } catch (_error) {
+    /* giỏ hàng cookie là tùy chọn, lỗi mạng không chặn trang */
+  }
 }
 
 function renderCart() {
@@ -363,6 +406,7 @@ checkoutForm.addEventListener('submit', async (event) => {
 
     cart = {};
     saveCart();
+    fetch('/api/cart', { method: 'DELETE', credentials: 'same-origin' }).catch(() => {});
     checkoutForm.hidden = true;
     cartActions.hidden = true;
     cartItems.hidden = true;
@@ -488,5 +532,6 @@ document.querySelectorAll('[data-search-term]').forEach((link) => {
 });
 
 renderCart();
+restoreCartFromCookie();
 loadProducts();
 })();
